@@ -115,6 +115,10 @@ def initialize_model_parallel(
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
+    
+    # Get world size and rank. Ensure some consistencies.
+    assert torch.distributed.is_initialized()
+    world_size: int = torch.distributed.get_world_size()
 
     if world_size % (tensor_model_parallel_size * pipeline_model_parallel_size) != 0:
         raise RuntimeError(
@@ -157,7 +161,10 @@ def initialize_model_parallel(
             ranks = range(start_rank + j, end_rank, tensor_model_parallel_size)
             all_data_parallel_group_ranks.append(list(ranks))
             group = torch.distributed.new_group(ranks)
-            group_gloo = torch.distributed.new_group(ranks, backend="gloo")
+            if world_size <= 8:
+                group_gloo = torch.distributed.new_group(ranks, backend="gloo")
+            else:
+                group_gloo = torch.distributed.new_group(ranks, backend="nccl")
             if rank in ranks:
                 _DATA_PARALLEL_GROUP = group
                 _DATA_PARALLEL_GROUP_GLOO = group_gloo

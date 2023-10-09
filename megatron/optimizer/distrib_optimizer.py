@@ -567,7 +567,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
           buffers.
         - Save world buffers to disk (i.e., distrib_opt.pt).
         """
-
+        # Order to judge cpu or cuda
+        assert torch.distributed.is_initialized()
+        world_size: int = torch.distributed.get_world_size()
+        
         # Data parallelism variables.
         data_parallel_world_size = mpu.get_data_parallel_world_size()
         data_parallel_rank = mpu.get_data_parallel_rank()
@@ -587,10 +590,16 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 model = self.models[model_idx]
                 gbuf_world_numel = model._grad_buffers[dtype].numel_padded
                 gbuf_local_numel = int(gbuf_world_numel / data_parallel_world_size)
-                local_shards = {key: torch.empty((gbuf_local_numel,),
-                                                 dtype=torch.float32,
-                                                 device="cpu")
-                                for key in ("param", "exp_avg", "exp_avg_sq")}
+                if world_size <=8:
+                    local_shards = {key: torch.empty((gbuf_local_numel,),
+                                                     dtype=torch.float32,
+                                                     device="cpu")
+                                    for key in ("param", "exp_avg", "exp_avg_sq")}
+                else:
+                    local_shards = {key: torch.empty((gbuf_local_numel,),
+                                                     dtype=torch.float32,
+                                                     device="cuda")
+                                    for key in ("param", "exp_avg", "exp_avg_sq")}
 
                 # Build contiguous DP rank shards (for param + optim states).
                 for model_param, param_range_map in \
@@ -612,8 +621,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     gbuf_local_start = param_range_map["gbuf_local"].start
                     gbuf_local_end = param_range_map["gbuf_local"].end
                     for key in local_shards:
-                        local_shards[key][gbuf_local_start:gbuf_local_end] \
-                            .data.copy_(tensors[key].detach().cpu())
+                        if world_size <=8:
+                            local_shards[key][gbuf_local_start:gbuf_local_end] \
+                                .data.copy_(tensors[key].detach().cpu())
+                        else:
+                            local_shards[key][gbuf_local_start:gbuf_local_end] \
+                                .data.copy_(tensors[key].detach().cuda())
 
                 # Gather contiguous shards on DP rank 0.
                 world_tensors = {}
@@ -621,10 +634,16 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
                     # Gather tensor list.
                     if data_parallel_rank == 0:
-                        recv_tensors = [torch.empty((gbuf_local_numel,),
-                                                    dtype=torch.float32,
-                                                    device="cpu")
-                                        for _ in range(data_parallel_world_size)]
+                        if world_size <=8:
+                            recv_tensors = [torch.empty((gbuf_local_numel,),
+                                                        dtype=torch.float32,
+                                                        device="cpu")
+                                            for _ in range(data_parallel_world_size)]
+                        else:
+                            recv_tensors = [torch.empty((gbuf_local_numel,),
+                                                        dtype=torch.float32,
+                                                        device="cuda")
+                                            for _ in range(data_parallel_world_size)]
                     else:
                         recv_tensors = None
 
