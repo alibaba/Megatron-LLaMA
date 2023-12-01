@@ -526,6 +526,9 @@ def _add_network_size_args(parser):
                        'attention. This is set to '
                        '   args.hidden_size // args.num_attention_heads '
                        'if not provided.')
+    group.add_argument('--position-embedding-type', type=str, default='learned_absolute',
+                    choices=['learned_absolute', 'rope', 'alibi'],
+                    help='Position embedding type.')
     group.add_argument('--max-position-embeddings', type=int, default=None,
                        help='Maximum number of position embeddings to use. '
                        'This is the size of position embedding.')
