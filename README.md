@@ -88,15 +88,23 @@ You can use the same launching method as in [Megatron-LM Usage](./original_READM
 This tool helps convert the format of paramters between Megatron-LLaMA/Megatron-LM and Huggingface format.
 
 **HuggingFace to Megatron-LLaMA**
-
+For LLaMa:
 ```
-sh tools/checkpoint_conversion/hf_to_megatron.sh
+sh tools/checkpoint_conversion/hf_to_megatron.sh  
+```
+For Baichuan:
+```
+sh tools/checkpoint_conversion/baichuan_hf_to_megatron.sh  
 ```
 
 **Megatron-LLaMA to HuggingFace**
-
+For LLaMa:
 ```
 sh tools/checkpoint_conversion/megatron_to_hf.sh
+```
+For Baichuan:
+```
+sh tools/checkpoint_conversion/baichuan_megatron_to_hf.sh  
 ```
 
 #### B. Launching scripts
