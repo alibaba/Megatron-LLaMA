@@ -85,7 +85,7 @@ Megatron-LLaMA使用方式与Megatron-LM基本一致，详细信息请参考[Meg
 
 **HuggingFace to Megatron-LLaMA**
 
-LLama:
+LLaMA:
 ```
 sh tools/checkpoint_conversion/hf_to_megatron.sh
 ```
@@ -98,7 +98,7 @@ sh tools/checkpoint_conversion/baichuan_hf_to_megatron.sh
 
 **Megatron-LLaMA to HuggingFace**
 
-LLama:
+LLaMA:
 ```
 sh tools/checkpoint_conversion/megatron_to_hf.sh
 ```
