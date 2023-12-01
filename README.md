@@ -89,7 +89,7 @@ This tool helps convert the format of paramters between Megatron-LLaMA/Megatron-
 
 **HuggingFace to Megatron-LLaMA**
 
-For LLaMa:
+For LLaMA:
 ```
 sh tools/checkpoint_conversion/hf_to_megatron.sh  
 ```
@@ -100,7 +100,7 @@ sh tools/checkpoint_conversion/baichuan_hf_to_megatron.sh
 
 **Megatron-LLaMA to HuggingFace**
 
-For LLaMa:
+For LLaMA:
 ```
 sh tools/checkpoint_conversion/megatron_to_hf.sh
 ```
