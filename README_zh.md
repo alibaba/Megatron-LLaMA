@@ -85,16 +85,26 @@ Megatron-LLaMA使用方式与Megatron-LM基本一致，详细信息请参考[Meg
 
 **HuggingFace to Megatron-LLaMA**
 
+LLama:
 ```
 sh tools/checkpoint_conversion/hf_to_megatron.sh
+```
+Baichuan:
+```
+sh tools/checkpoint_conversion/baichuan_hf_to_megatron.sh
 ```
 
 完成训练后，将训练产出的权重转换成HuggingFace支持的格式，方便后续使用：
 
 **Megatron-LLaMA to HuggingFace**
 
+LLama:
 ```
 sh tools/checkpoint_conversion/megatron_to_hf.sh
+```
+Baichuan:
+```
+sh tools/checkpoint_conversion/baichuan_megatron_to_hf.sh
 ```
 
 ### B. LLaMA训练脚本
