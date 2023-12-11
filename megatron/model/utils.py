@@ -31,6 +31,11 @@ def attention_mask_func(attention_scores, attention_mask):
     return attention_scores
 
 
+def alibi_mask_func(attention_scores, attention_mask):
+    attention_scores = attention_scores + attention_mask
+    return attention_scores
+
+
 def get_linear_layer(rows, columns, init_method):
     """Simple linear layer with weight initialization."""
     layer = torch.nn.Linear(rows, columns)
