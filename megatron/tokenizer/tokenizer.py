@@ -551,7 +551,7 @@ class _AutoTokenizer(AbstractTokenizer):
         hf_tokenizer_kwargs = {}
         if vocab_extra_ids > 0:
             hf_tokenizer_kwargs["additional_special_tokens"] = [f"<extra_id_{_id}>" for _id in range(vocab_extra_ids)]
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, **hf_tokenizer_kwargs)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, trust_remote_code=True,**hf_tokenizer_kwargs)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.encoder = self.tokenizer.get_vocab()
         self.decoder = {v: k for k, v in self.encoder.items()}
