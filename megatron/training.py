@@ -964,11 +964,8 @@ def build_train_valid_test_data_loaders(
         flags = torch.cuda.LongTensor([0, 0, 0])
     # Broadcast num tokens.
     torch.distributed.barrier()
-    print("begin brodcast ", flags)
-    print("mpu.get_tensor_model_parallel_src_rank()" + str(mpu.get_tensor_model_parallel_src_rank()))
     # torch.distributed.broadcast(flags, mpu.get_tensor_model_parallel_src_rank(), group=mpu.get_tensor_model_parallel_group())
     torch.distributed.broadcast(flags, 0)
-    print("brodcast done")
     args.do_train = flags[0].item()
     args.do_valid = flags[1].item()
     args.do_test = flags[2].item()
@@ -985,7 +982,6 @@ def build_train_valid_test_data_iterators(
     train_dataloader, valid_dataloader, test_dataloader = \
         build_train_valid_test_data_loaders(
             build_train_valid_test_datasets_provider, data_collator)
-    print("dataloader done")
     # Build iterators.
     dl_type = args.dataloader_type
     assert dl_type in ['single', 'cyclic'], "dl_type not in 'single', 'cyclic' "
@@ -995,7 +991,6 @@ def build_train_valid_test_data_iterators(
                               else iter(cyclic_iter(train_dataloader))
     else:
         train_data_iterator = None
-    print("train_data_iterator done")
 
     if valid_dataloader is not None:
         valid_data_iterator = iter(valid_dataloader) if dl_type == 'single' \
