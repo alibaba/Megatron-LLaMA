@@ -16,7 +16,7 @@ from megatron.model.enums import AttnMaskType, LayerType, AttnType
 from megatron.model.fused_softmax import FusedScaleMaskSoftmax
 from megatron.model.fused_bias_gelu import bias_gelu_impl
 from megatron.model.rotary_pos_embedding import apply_rotary_pos_emb
-from megatron.model.utils import attention_mask_func, openai_gelu, erf_gelu
+from megatron.model.utils import attention_mask_func, alibi_mask_func, openai_gelu, erf_gelu
 
 try:
     from einops import rearrange
@@ -55,6 +55,48 @@ except ImportError:
     tensor of the same size. We use the following arguments:
         hyperparameters: transformer hyperparameters
 """
+
+def get_slopes(n):
+    def get_slopes_power_of_2(n):
+        start = (2 ** (-2 ** -(math.log2(n) - 3)))
+        ratio = start
+        return [start * ratio ** i for i in range(n)]
+
+    if math.log2(n).is_integer():
+        return get_slopes_power_of_2(n)
+    else:
+        closest_power_of_2 = 2 ** math.floor(math.log2(n))
+        return (
+            get_slopes_power_of_2(closest_power_of_2)
+            + get_slopes(
+                2 * closest_power_of_2,
+            )[0::2][:n - closest_power_of_2]
+        )
+        
+def _fill_with_neg_inf(t):
+    """FP16-compatible function that fills a tensor with -inf."""
+    return t.float().fill_(float("-inf")).type_as(t)
+
+
+def _buffered_future_mask(tensor, maxpos, alibi, attn_heads):
+    _future_mask = torch.triu(_fill_with_neg_inf(torch.zeros([maxpos, maxpos])), 1)
+    _future_mask = _future_mask.unsqueeze(0) + alibi
+    new_future_mask = _future_mask.to(tensor)
+    return new_future_mask[: tensor.shape[0] * attn_heads, :maxpos, :maxpos]
+
+
+def _gen_alibi_mask(num_attention_heads, max_seq_len):
+    slopes = torch.Tensor(get_slopes(num_attention_heads))
+    alibi = (
+        slopes.unsqueeze(1).unsqueeze(1)
+        * torch.arange(max_seq_len).unsqueeze(0).unsqueeze(0).expand(
+            num_attention_heads, -1, -1)
+    )  
+    # alibi = alibi.unsqueeze(0)
+    alibi_mask = torch.triu(_fill_with_neg_inf(torch.zeros([max_seq_len, max_seq_len])), 1)  # [max_seq_len, max_seq_len]
+    alibi_mask = alibi_mask.unsqueeze(0) + alibi   # [num_attention_heads, max_seq_len, max_seq_len]
+    return alibi_mask
+
 
 class DropPath(MegatronModule):
     """Drop paths (Stochastic Depth) per sample
@@ -247,11 +289,16 @@ class CoreAttention(MegatronModule):
             coeff = self.layer_number
             self.norm_factor *= coeff
 
+        cur_mask_func = attention_mask_func
+        self.position_embedding_type = args.position_embedding_type
+        if args.position_embedding_type == "alibi":
+            cur_mask_func = alibi_mask_func
+
         self.scale_mask_softmax = FusedScaleMaskSoftmax(
             self.fp16, self.bf16,
             self.attn_mask_type,
             args.masked_softmax_fusion,
-            attention_mask_func,
+            cur_mask_func,
             self.attention_softmax_in_fp32,
             coeff)
 
@@ -266,7 +313,7 @@ class CoreAttention(MegatronModule):
         # ===================================
         # Raw attention scores. [b, np, s, s]
         # ===================================
-
+        q_len = query_layer.size(0)
         # [b, np, sq, sk]
         output_size = (query_layer.size(1),
                        query_layer.size(2),
@@ -302,6 +349,11 @@ class CoreAttention(MegatronModule):
         # ===========================
 
         # attention scores and attention mask [b, np, sq, sk]
+        if q_len == 1 and self.position_embedding_type == "alibi":  # inference with cache
+            if len(attention_mask.size()) == 4:
+                attention_mask = attention_mask[:, :, -1:, :]
+            else:
+                attention_mask = attention_mask[:, -1:, :]
         attention_probs = self.scale_mask_softmax(attention_scores, attention_mask)
 
         # This is actually dropping out entire tokens to attend to, which might
@@ -409,7 +461,7 @@ class FlashSelfAttention(torch.nn.Module):
             )
         else:
             output = flash_attn_func(
-                q, k, v, bias, self.softmax_scale, is_causal
+                q, k, v, bias, is_causal, self.softmax_scale
             )
         # output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
         return output
@@ -435,6 +487,7 @@ class ParallelAttention(MegatronModule):
         self.sequence_parallel = args.sequence_parallel
 
         self.use_flash_attn = args.use_flash_attn
+        self.position_embedding_type = args.position_embedding_type
         if self.use_flash_attn:
             if flash_attn_unpadded_func is None:
                 raise ImportError('FlashAttention is not installed, please install with '
@@ -489,10 +542,24 @@ class ParallelAttention(MegatronModule):
         self.core_attention = CoreAttention(self.layer_number,
                                             self.attn_mask_type)
         self.checkpoint_core_attention = args.recompute_granularity == 'selective'
+        
+        self.apply_query_key_layer_scaling = args.apply_query_key_layer_scaling
+        world_size = mpu.get_tensor_model_parallel_world_size()
+        self.hidden_size_per_partition = core.utils.divide(projection_size,
+                                                           world_size)
+        self.hidden_size_per_attention_head = core.utils.divide(
+            projection_size, args.num_attention_heads)
+        self.num_attention_heads_per_partition = core.utils.divide(
+            args.num_attention_heads, world_size)
 
+        coeff = None
+        self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
+        if self.apply_query_key_layer_scaling:
+            coeff = self.layer_number
+            self.norm_factor *= coeff
         if self.use_flash_attn:
             self.core_attention_flash = FlashSelfAttention(
-                causal=True, attention_dropout=args.attention_dropout
+                causal=True, softmax_scale=(1.0/self.norm_factor), attention_dropout=args.attention_dropout
             )
 
         # Output.
@@ -541,7 +608,6 @@ class ParallelAttention(MegatronModule):
                 encoder_output=None, inference_params=None,
                 rotary_pos_emb=None):
         # hidden_states: [sq, b, h]
-
         # =================================================
         # Pre-allocate memory for key-values for inference.
         # =================================================
@@ -569,7 +635,6 @@ class ParallelAttention(MegatronModule):
             # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
             mixed_x_layer, _ = self.query_key_value(hidden_states)
             query_layer, key_layer, value_layer = tensor_parallel.split_tensor_along_last_dim(mixed_x_layer, 3)
-
             # Changed layout, for compatibility with CKPT conversion
             new_tensor_shape = query_layer.size()[:-1] + \
                 (self.num_attention_heads_per_partition, self.hidden_size_per_attention_head)
@@ -577,7 +642,6 @@ class ParallelAttention(MegatronModule):
             query_layer = query_layer.view(new_tensor_shape)
             key_layer = key_layer.view(new_tensor_shape)
             value_layer = value_layer.view(new_tensor_shape)
-
         else:
             # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
             mixed_kv_layer, _ = self.key_value(encoder_output)
@@ -602,7 +666,6 @@ class ParallelAttention(MegatronModule):
         # ==================================
         # Adjust key and value for inference
         # ==================================
-
         # duplicate the pos_emb for self attention
         if rotary_pos_emb is not None:
             if isinstance(rotary_pos_emb, tuple):
@@ -626,8 +689,6 @@ class ParallelAttention(MegatronModule):
                 :sequence_end, batch_start:batch_end, ...]
             value_layer = inference_value_memory[
                 :sequence_end, batch_start:batch_end, ...]
-
-
             # adjust the key rotary positional embedding
             if rotary_pos_emb is not None:
                 q_pos_emb, k_pos_emb = rotary_pos_emb
@@ -662,7 +723,6 @@ class ParallelAttention(MegatronModule):
             # absolute positional embedding.
             # otherwise, only relative positional embedding takes effect
             # value_layer = apply_rotary_pos_emb(value_layer, k_pos_emb)
-
         if not self.use_flash_attn:
             if self.checkpoint_core_attention:
                 context_layer = self._checkpointed_attention_forward(
@@ -673,19 +733,17 @@ class ParallelAttention(MegatronModule):
         else:
             q, k, v = [rearrange(x, 's b ... -> b s ...').contiguous()
                        for x in (query_layer, key_layer, value_layer)]
+            cur_mask = None
             if not self.sequence_parallel:
                 with tensor_parallel.get_cuda_rng_tracker().fork():
                     context_layer = self.core_attention_flash(q, k, v, bias=attention_mask)
             else:
                 context_layer = self.core_attention_flash(q, k, v, bias=attention_mask)
             context_layer = rearrange(context_layer, 'b s h d -> s b (h d)').contiguous()
-
         # =================
         # Output. [sq, b, h]
         # =================
-
         output, bias = self.dense(context_layer)
-
         return output, bias
 
 
@@ -801,7 +859,6 @@ class ParallelTransformerLayer(MegatronModule):
                 encoder_output=None, enc_dec_attn_mask=None,
                 inference_params=None, rotary_pos_emb=None):
         # hidden_states: [s, b, h]
-
         # Layer norm at the beginning of the transformer layer.
         layernorm_output = self.input_layernorm(hidden_states)
         # Self attention.
@@ -811,13 +868,11 @@ class ParallelTransformerLayer(MegatronModule):
                 attention_mask,
                 inference_params=inference_params,
                 rotary_pos_emb=rotary_pos_emb)
-        
         # Residual connection.
         if self.apply_residual_connection_post_layernorm:
             residual = layernorm_output
         else:
             residual = hidden_states
-
         if self.drop_path is None:
             # jit scripting for a nn.module (with dropout) is not
             # trigerring the fusion kernel. For now, we use two
@@ -844,10 +899,8 @@ class ParallelTransformerLayer(MegatronModule):
                                               p=self.hidden_dropout,
                                               training=self.training)
             layernorm_input = residual + self.drop_path(out)
-
         # Layer norm post the self attention.
         layernorm_output = self.post_attention_layernorm(layernorm_input)
-
         if self.layer_type == LayerType.decoder:
             attention_output, attention_bias = \
                 self.inter_attention(layernorm_output,
@@ -874,7 +927,7 @@ class ParallelTransformerLayer(MegatronModule):
 
         # MLP.
         mlp_output, mlp_bias = self.mlp(layernorm_output)
-
+        #     torch.distributed.barrier()
         # Second residual connection.
         if self.apply_residual_connection_post_layernorm:
             residual = layernorm_output
@@ -908,7 +961,6 @@ class ParallelTransformerLayer(MegatronModule):
                                               p=self.hidden_dropout,
                                               training=self.training)
             output = residual + self.drop_path(out)
-
         return output
 
 
@@ -1021,9 +1073,10 @@ class ParallelTransformer(MegatronModule):
         self.recompute_num_layers = args.recompute_num_layers
         self.distribute_saved_activations = \
             args.distribute_saved_activations and not args.sequence_parallel
-
+        self.first_run = True
+        self.max_cache_pos = args.max_position_embeddings
         self.sequence_parallel = args.sequence_parallel
-
+        self.alibi_mask = None
         # Transformer Engine Init.
         if self.transformer_impl == 'transformer_engine':
             global transformer_engine
@@ -1241,48 +1294,54 @@ class ParallelTransformer(MegatronModule):
         forward_step_func"""
         self.input_tensor = input_tensor
 
-    @staticmethod
-    def _build_alibi_tensor(max_seq_len, num_attention_heads, batch_size):
+    def _build_alibi_tensor(self, tensor, max_seq_len, num_attention_heads):
         # Copied from bigscience-workshop/Megatron-DeepSpeed
         # Based on https://github.com/ofirpress/attention_with_linear_biases/blob/a35aaca144e0eb6b789dfcb46784c4b8e31b7983/fairseq/models/transformer.py#L742
         """Returns tensor shaped
         (1, num_attention_heads_per_partition, 1, max_seq_len),
         """
-
-        def get_slopes(n):
-            def get_slopes_power_of_2(n):
-                start = (2 ** (-2 ** -(math.log2(n) - 3)))
-                ratio = start
-                return [start * ratio ** i for i in range(n)]
-
-            if math.log2(n).is_integer():
-                return get_slopes_power_of_2(n)
-            else:
-                closest_power_of_2 = 2 ** math.floor(math.log2(n))
-                return (
-                    get_slopes_power_of_2(closest_power_of_2)
-                    + get_slopes(
-                        2 * closest_power_of_2,
-                    )[0::2][:n - closest_power_of_2]
+        if self.training:
+            slopes = torch.Tensor(get_slopes(num_attention_heads))
+            position_point = (
+                torch.arange(max_seq_len) - max_seq_len + 1
+            )
+            position_point = (
+                position_point.unsqueeze(0)
+                .unsqueeze(0)
+                .expand(num_attention_heads, max_seq_len, -1)
+            )
+            diag = torch.diag(position_point[0])
+            position_point = position_point - diag.unsqueeze(0).unsqueeze(0).transpose(
+                -1, -2
+            )
+            alibi = slopes.unsqueeze(1).unsqueeze(1) * position_point
+            mask = _buffered_future_mask(
+                tensor, max_seq_len, alibi, num_attention_heads
+            )
+        else:
+            if self.first_run:
+                self.first_run = False
+                self.register_buffer(
+                    "future_mask",
+                    _gen_alibi_mask(num_attention_heads, self.max_cache_pos).to(
+                        tensor
+                    ),
+                    persistent=False,
                 )
+            if max_seq_len > self.max_cache_pos:
+                self.max_cache_pos = max_seq_len
+                self.register_buffer(
+                    "future_mask",
+                    _gen_alibi_mask(num_attention_heads, self.max_cache_pos).to(
+                        tensor
+                    ),
+                    persistent=False,
+                )
+            mask = self.future_mask[
+                : num_attention_heads, :max_seq_len, :max_seq_len
+            ]
+        return mask
 
-        slopes = torch.Tensor(get_slopes(num_attention_heads))
-        alibi = (
-            slopes.unsqueeze(1).unsqueeze(1)
-            * torch.arange(max_seq_len).unsqueeze(0).unsqueeze(0).expand(
-                num_attention_heads, -1, -1)
-        )  
- 
-        # Select the part of the tensor that corresponds to our tensor
-        # parallel index.
-        tp_world_size = mpu.get_tensor_model_parallel_world_size()
-        tp_index = mpu.get_tensor_model_parallel_rank()
-        alibi = alibi.reshape((tp_world_size, -1, *alibi.shape[1:]))[tp_index]  # [num_attention_heads/world, 1, max_seq_len]
-
-        # alibi = alibi.unsqueeze(0)
-        alibi_mask = torch.triu(_fill_with_neg_inf(torch.zeros([max_pos, max_pos])), 1)  # [max_seq_len, max_seq_len]
-        alibi_mask = alibi_mask.unsqueeze(0) + alibi   # [num_attention_heads/world, max_seq_len, max_seq_len]
-        return alibi_mask
 
     def forward(self, hidden_states, attention_mask,
                 encoder_output=None, enc_dec_attn_mask=None,
@@ -1294,17 +1353,27 @@ class ParallelTransformer(MegatronModule):
             seq_len = hidden_states.shape[0]
             if self.sequence_parallel:
                 seq_len = seq_len * mpu.get_tensor_model_parallel_world_size()
-            alibi_mask = self._build_alibi_tensor(
-                seq_len,
-                self.num_attention_heads,
-                hidden_states.shape[1],
-            ).to(torch.cuda.current_device())
+            if self.training:
+                if (
+                    self.alibi_mask is None
+                    or self.alibi_mask.shape[-1] != seq_len
+                ):
+                    self.alibi_mask = self._build_alibi_tensor(
+                        hidden_states, seq_len, self.num_attention_heads
+                    ).to(torch.cuda.current_device())
+                alibi_mask = self.alibi_mask
+            else:
+                alibi_mask = self._build_alibi_tensor(hidden_states, seq_len, self.num_attention_heads).to(torch.cuda.current_device())
             if self.params_dtype is torch.float16:
                 alialibi_maskbi = alibi_mask.to(torch.float16)
             elif self.params_dtype is torch.bfloat16:
-                alibi_mask = alibi_mask.to(torch.bfloat16)
+                alibi_mask = alibi_mask.to(torch.bfloat16)  # [head, seq_len, seq_len]
+            # Select the part of the tensor that corresponds to our tensor
+            # parallel index.
+            tp_world_size = mpu.get_tensor_model_parallel_world_size()
+            tp_index = mpu.get_tensor_model_parallel_rank()
+            alibi_mask = alibi_mask.reshape((tp_world_size, -1, *alibi_mask.shape[1:]))[tp_index]  # [num_attention_heads/world, seq_len, max_seq_len]
             if attention_mask is not None:
-                print("attention_mask", attention_mask.shape)
                 if len(attention_mask.shape) == 2:
                     expanded_mask = attention_mask.to(alibi_mask.dtype)
                     expanded_mask = torch.tril(
@@ -1312,18 +1381,17 @@ class ParallelTransformer(MegatronModule):
                     ) * torch.eq(expanded_mask[:, :, None] - expanded_mask[:, None, :], 0)
                 else:
                     expanded_mask = attention_mask
-                bsz = inputs_embeds.size(0)
+                bsz = hidden_states.size(1)
                 src_len, tgt_len = alibi_mask.size()[-2:]
                 expanded_mask = (
-                    expanded_mask.unsqueeze(1)
+                    expanded_mask
                     .expand(bsz, 1, src_len, tgt_len)
                     .to(alibi_mask.dtype)
                 )
-                inverted_mask = 1.0 - expanded_mask
-                inverted_mask = inverted_mask.masked_fill(
-                    inverted_mask.to(torch.bool), torch.finfo(alibi_mask.dtype).min
+                expanded_mask = expanded_mask.masked_fill(
+                    expanded_mask.to(torch.bool), torch.finfo(alibi_mask.dtype).min
                 )
-                attention_mask = inverted_mask + alibi_mask.unsqueeze(0)
+                attention_mask = expanded_mask + alibi_mask.unsqueeze(0)  # [batch_size, head_size, seq_len, seq_len]
             else:
                 attention_mask = alibi_mask
         # Checks.
@@ -1406,7 +1474,6 @@ class ParallelTransformer(MegatronModule):
                 # Skip counter update for eval and activation checkpointing
                 if torch.is_grad_enabled() and self.training:
                     self.microbatch_count += 1
-
         # Final layer norm.
         if self.post_process and self.post_layer_norm:
             hidden_states = self.final_layernorm(hidden_states)
