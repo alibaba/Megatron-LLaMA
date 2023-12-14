@@ -113,8 +113,13 @@ sh tools/checkpoint_conversion/baichuan_megatron_to_hf.sh
 
 **Single-node launching**
 
+For LLaMA:
 ```
 sh examples/LLaMA/LLaMA_13_standalone.sh
+```
+For Baichuan:
+```
+sh examples/Baichuan_13_standalone.sh  
 ```
 
 **Distributed launching**
