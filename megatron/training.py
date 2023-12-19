@@ -963,8 +963,9 @@ def build_train_valid_test_data_loaders(
     else:
         flags = torch.cuda.LongTensor([0, 0, 0])
     # Broadcast num tokens.
-    torch.distributed.barrier()
-    # torch.distributed.broadcast(flags, mpu.get_tensor_model_parallel_src_rank(), group=mpu.get_tensor_model_parallel_group())
+    # torch.distributed.broadcast(flags, 
+    #                             mpu.get_tensor_model_parallel_src_rank(), 
+    #                             group=mpu.get_tensor_model_parallel_group())
     torch.distributed.broadcast(flags, 0)
     args.do_train = flags[0].item()
     args.do_valid = flags[1].item()
