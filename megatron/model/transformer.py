@@ -16,7 +16,7 @@ from megatron.model.enums import AttnMaskType, LayerType, AttnType
 from megatron.model.fused_softmax import FusedScaleMaskSoftmax
 from megatron.model.fused_bias_gelu import bias_gelu_impl
 from megatron.model.rotary_pos_embedding import apply_rotary_pos_emb
-from megatron.model.utils import attention_mask_func, alibi_mask_func, openai_gelu, erf_gelu
+from megatron.model.utils import attention_mask_func, alibi_mask_func, get_slopes, openai_gelu, erf_gelu
 
 try:
     from einops import rearrange
@@ -32,13 +32,18 @@ except ImportError:
 
 try:
     from flash_attn.flash_attn_interface import flash_attn_unpadded_func
-    from flash_attn.flash_attn_triton import flash_attn_func
 except ImportError:
     try:
         from flash_attn.flash_attn_interface import flash_attn_varlen_func as flash_attn_unpadded_func
-        from flash_attn.flash_attn_triton import flash_attn_func
     except ImportError:
         flash_attn_unpadded_func = None
+
+try:
+    from flash_attn.flash_attn_triton import flash_attn_func
+except ImportError:
+    try:
+        from flash_attn.flash_attn_triton import flash_attn_func
+    except ImportError:
         flash_attn_func = None
 
 """ We use the following notation throughout this file:
@@ -56,22 +61,6 @@ except ImportError:
         hyperparameters: transformer hyperparameters
 """
 
-def get_slopes(n):
-    def get_slopes_power_of_2(n):
-        start = (2 ** (-2 ** -(math.log2(n) - 3)))
-        ratio = start
-        return [start * ratio ** i for i in range(n)]
-
-    if math.log2(n).is_integer():
-        return get_slopes_power_of_2(n)
-    else:
-        closest_power_of_2 = 2 ** math.floor(math.log2(n))
-        return (
-            get_slopes_power_of_2(closest_power_of_2)
-            + get_slopes(
-                2 * closest_power_of_2,
-            )[0::2][:n - closest_power_of_2]
-        )
         
 def _fill_with_neg_inf(t):
     """FP16-compatible function that fills a tensor with -inf."""
@@ -86,7 +75,7 @@ def _buffered_future_mask(tensor, maxpos, alibi, attn_heads):
 
 
 def _gen_alibi_mask(num_attention_heads, max_seq_len):
-    slopes = torch.Tensor(get_slopes(num_attention_heads))
+    slopes = torch.Tensor(get_slopes(num_attention_heads), device=torch.cuda.current_device())
     alibi = (
         slopes.unsqueeze(1).unsqueeze(1)
         * torch.arange(max_seq_len).unsqueeze(0).unsqueeze(0).expand(
@@ -313,6 +302,7 @@ class CoreAttention(MegatronModule):
         # ===================================
         # Raw attention scores. [b, np, s, s]
         # ===================================
+        
         q_len = query_layer.size(0)
         # [b, np, sq, sk]
         output_size = (query_layer.size(1),
@@ -328,11 +318,8 @@ class CoreAttention(MegatronModule):
                                    output_size[0] * output_size[1], -1)
 
         # preallocting input tensor: [b * np, sq, sk]
-        # preallocting input tensor: [b * np, sq, sk]
         matmul_input_buffer = mpu.get_global_memory_buffer().get_tensor(
-            (output_size[0]*output_size[1],
-                output_size[2],
-                output_size[3]),
+            (output_size[0]*output_size[1], output_size[2], output_size[3]),
             query_layer.dtype, "mpu")
 
         matmul_result = torch.baddbmm(
@@ -434,7 +421,7 @@ class FlashSelfAttention(torch.nn.Module):
 
         batch_size, seqlen_q = q.shape[0], q.shape[1]
         seqlen_k = k.shape[1]
-        # q, k, v = [rearrange(x, 'b s ... -> (b s) ...') for x in [q, k, v]]
+        q, k, v = [rearrange(x, 'b s ... -> (b s) ...') for x in [q, k, v]]
 
         cu_seqlens_q = torch.arange(0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32,
                                     device=q.device)
@@ -552,14 +539,15 @@ class ParallelAttention(MegatronModule):
         self.num_attention_heads_per_partition = core.utils.divide(
             args.num_attention_heads, world_size)
 
-        coeff = None
-        self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
-        if self.apply_query_key_layer_scaling:
-            coeff = self.layer_number
-            self.norm_factor *= coeff
+        # coeff = None
+        # self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
+        # if self.apply_query_key_layer_scaling:
+        #     coeff = self.layer_number
+        #     self.norm_factor *= coeff
+        # Thoese for softmax_scale. Current instances doesn't need for now.
         if self.use_flash_attn:
             self.core_attention_flash = FlashSelfAttention(
-                causal=True, softmax_scale=(1.0/self.norm_factor), attention_dropout=args.attention_dropout
+                causal=True, attention_dropout=args.attention_dropout
             )
 
         # Output.
@@ -582,7 +570,7 @@ class ParallelAttention(MegatronModule):
             value_layer = inputs[2]
             attention_mask = inputs[3]
             output_ = self.core_attention(query_layer, key_layer,
-                                            value_layer, attention_mask)
+                                          value_layer, attention_mask)
             return output_
 
         q_pos_emb, k_pos_emb = (None, None) if rotary_pos_emb is None \
@@ -927,7 +915,7 @@ class ParallelTransformerLayer(MegatronModule):
 
         # MLP.
         mlp_output, mlp_bias = self.mlp(layernorm_output)
-        #     torch.distributed.barrier()
+        
         # Second residual connection.
         if self.apply_residual_connection_post_layernorm:
             residual = layernorm_output
@@ -1463,6 +1451,7 @@ class ParallelTransformer(MegatronModule):
                         forward_kwargs['checkpoint_core_attention'] = self.checkpoint_core_attention
                     else:
                         forward_kwargs['rotary_pos_emb'] = rotary_pos_emb
+                    
                     for index in range(self.num_layers):
                         layer = self._get_layer(index)
 
@@ -1474,7 +1463,9 @@ class ParallelTransformer(MegatronModule):
                 # Skip counter update for eval and activation checkpointing
                 if torch.is_grad_enabled() and self.training:
                     self.microbatch_count += 1
+                    
         # Final layer norm.
         if self.post_process and self.post_layer_norm:
             hidden_states = self.final_layernorm(hidden_states)
+            
         return hidden_states
