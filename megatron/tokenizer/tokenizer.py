@@ -43,7 +43,7 @@ def build_tokenizer(args):
         tokenizer = _NullTokenizer(args.vocab_size)
     elif args.tokenizer_type == 'PretrainedFromHF':
         assert args.tokenizer_name_or_path is not None
-        tokenizer = _AutoTokenizer(args.tokenizer_name_or_path, vocab_extra_ids=args.vocab_extra_ids)
+        tokenizer = _AutoTokenizer(args.tokenizer_name_or_path, trust_remote_code=args.trust_remote_code, vocab_extra_ids=args.vocab_extra_ids)
     else:
         raise NotImplementedError('{} tokenizer is not '
                                   'implemented.'.format(args.tokenizer_type))
