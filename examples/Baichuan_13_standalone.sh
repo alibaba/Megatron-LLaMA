@@ -87,4 +87,4 @@ options=" \
         --recompute-granularity selective \
     --use-flash-attn"
 
-torchrun --nproc_per_node=8 --master_port=29500 pretrain_llama.py ${options}
+torchrun --nproc_per_node=8 --master_port=29500 pretrain_baichuan.py ${options}
