@@ -36,6 +36,24 @@ def alibi_mask_func(attention_scores, attention_mask):
     return attention_scores
 
 
+def get_slopes(n):
+    def get_slopes_power_of_2(n):
+        start = (2 ** (-2 ** -(math.log2(n) - 3)))
+        ratio = start
+        return [start * ratio ** i for i in range(n)]
+
+    if math.log2(n).is_integer():
+        return get_slopes_power_of_2(n)
+    else:
+        closest_power_of_2 = 2 ** math.floor(math.log2(n))
+        return (
+            get_slopes_power_of_2(closest_power_of_2)
+            + get_slopes(
+                2 * closest_power_of_2,
+            )[0::2][:n - closest_power_of_2]
+        )
+
+
 def get_linear_layer(rows, columns, init_method):
     """Simple linear layer with weight initialization."""
     layer = torch.nn.Linear(rows, columns)
