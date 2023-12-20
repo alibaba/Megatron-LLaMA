@@ -65,17 +65,17 @@ def _fill_with_neg_inf(t):
 
 
 def _buffered_future_mask(tensor, maxpos, alibi, attn_heads):
-    _future_mask = torch.triu(_fill_with_neg_inf(torch.zeros([maxpos, maxpos])), 1)
+    _future_mask = torch.triu(_fill_with_neg_inf(torch.zeros([maxpos, maxpos])), 1).to(torch.cuda.current_device())
     _future_mask = _future_mask.unsqueeze(0) + alibi
     new_future_mask = _future_mask.to(tensor)
     return new_future_mask[: tensor.shape[0] * attn_heads, :maxpos, :maxpos]
 
 
 def _gen_alibi_mask(num_attention_heads, max_seq_len):
-    slopes = torch.Tensor(get_slopes(num_attention_heads), device=torch.cuda.current_device())
+    slopes = torch.tensor(get_slopes(num_attention_heads), device=torch.cuda.current_device())
     alibi = (
         slopes.unsqueeze(1).unsqueeze(1)
-        * torch.arange(max_seq_len).unsqueeze(0).unsqueeze(0).expand(
+        * torch.arange(max_seq_len, device=torch.cuda.current_device()).unsqueeze(0).unsqueeze(0).expand(
             num_attention_heads, -1, -1)
     )  
     # alibi = alibi.unsqueeze(0)
@@ -1293,10 +1293,10 @@ class ParallelTransformer(MegatronModule):
         (1, num_attention_heads_per_partition, 1, max_seq_len),
         """
         if self.training:
-            slopes = torch.Tensor(get_slopes(num_attention_heads))
+            slopes = torch.tensor(get_slopes(num_attention_heads), device=torch.cuda.current_device())
             position_point = (
                 torch.arange(max_seq_len) - max_seq_len + 1
-            )
+            ).to(torch.cuda.current_device())
             position_point = (
                 position_point.unsqueeze(0)
                 .unsqueeze(0)
