@@ -41,10 +41,7 @@ except ImportError:
 try:
     from flash_attn.flash_attn_triton import flash_attn_func
 except ImportError:
-    try:
-        from flash_attn.flash_attn_triton import flash_attn_func
-    except ImportError:
-        flash_attn_func = None
+    flash_attn_func = None
 
 """ We use the following notation throughout this file:
      h: hidden size
@@ -421,7 +418,8 @@ class FlashSelfAttention(torch.nn.Module):
 
         batch_size, seqlen_q = q.shape[0], q.shape[1]
         seqlen_k = k.shape[1]
-        q, k, v = [rearrange(x, 'b s ... -> (b s) ...') for x in [q, k, v]]
+        if bias is None:
+            q, k, v = [rearrange(x, 'b s ... -> (b s) ...') for x in [q, k, v]]
 
         cu_seqlens_q = torch.arange(0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32,
                                     device=q.device)
@@ -531,13 +529,13 @@ class ParallelAttention(MegatronModule):
         self.checkpoint_core_attention = args.recompute_granularity == 'selective'
         
         self.apply_query_key_layer_scaling = args.apply_query_key_layer_scaling
-        world_size = mpu.get_tensor_model_parallel_world_size()
+        tensor_parallel_size = mpu.get_tensor_model_parallel_world_size()
         self.hidden_size_per_partition = core.utils.divide(projection_size,
-                                                           world_size)
+                                                           tensor_parallel_size)
         self.hidden_size_per_attention_head = core.utils.divide(
             projection_size, args.num_attention_heads)
         self.num_attention_heads_per_partition = core.utils.divide(
-            args.num_attention_heads, world_size)
+            args.num_attention_heads, tensor_parallel_size)
 
         # coeff = None
         # self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
@@ -724,9 +722,15 @@ class ParallelAttention(MegatronModule):
             cur_mask = None
             if not self.sequence_parallel:
                 with tensor_parallel.get_cuda_rng_tracker().fork():
-                    context_layer = self.core_attention_flash(q, k, v, bias=attention_mask)
+                    if self.position_embedding_type == "alibi":
+                        context_layer = self.core_attention_flash(q, k, v, bias=attention_mask)
+                    else:
+                        context_layer = self.core_attention_flash(q, k, v)
             else:
-                context_layer = self.core_attention_flash(q, k, v, bias=attention_mask)
+                if self.position_embedding_type == "alibi":
+                    context_layer = self.core_attention_flash(q, k, v, bias=attention_mask)
+                else:
+                    context_layer = self.core_attention_flash(q, k, v)
             context_layer = rearrange(context_layer, 'b s h d -> s b (h d)').contiguous()
         # =================
         # Output. [sq, b, h]
