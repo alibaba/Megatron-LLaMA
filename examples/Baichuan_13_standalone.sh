@@ -48,7 +48,7 @@ options=" \
     --tokenizer-type PretrainedFromHF \
         --tokenizer-name-or-path $TOKENIZER_PATH \
         --make-vocab-size-divisible-by 1 \
-        --trust_remote_code \
+        --trust-remote-code \
     --init-method-std 0.01 \
     --micro-batch-size ${MICRO_BATCH_SIZE} \
         --global-batch-size ${GLOBAL_BATCH_SIZE} \
