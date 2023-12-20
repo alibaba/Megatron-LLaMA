@@ -1107,7 +1107,7 @@ def _add_data_args(parser):
                        help='Sentencepiece tokenizer model.')
     group.add_argument('--tokenizer-name-or-path', type=str, default=None,
                        help='tokenizer model path for PretrainedFromHF.')
-    group.add_argument('--trust_remote_code', action='store_true',
+    group.add_argument('--trust-remote-code', action='store_true',
                        help='Whether trust remote code when using PretrainedFromHF.')
     group.add_argument('--data-impl', type=str, default='infer',
                        choices=['lazy', 'cached', 'mmap', 'infer'],
