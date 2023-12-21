@@ -79,7 +79,7 @@ def _gen_alibi_mask(num_attention_heads, max_seq_len):
             num_attention_heads, -1, -1)
     )  
     # alibi = alibi.unsqueeze(0)
-    alibi_mask = torch.triu(_fill_with_neg_inf(torch.zeros([max_seq_len, max_seq_len])), 1)  # [max_seq_len, max_seq_len]
+    alibi_mask = torch.triu(_fill_with_neg_inf(torch.zeros([max_seq_len, max_seq_len])), 1).to(torch.cuda.current_device())  # [max_seq_len, max_seq_len]
     alibi_mask = alibi_mask.unsqueeze(0) + alibi   # [num_attention_heads, max_seq_len, max_seq_len]
     return alibi_mask
 
