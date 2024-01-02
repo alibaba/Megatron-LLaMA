@@ -56,7 +56,6 @@ def pretrain(train_valid_test_dataset_provider,
              forward_step_func,
              process_non_loss_data_func=None,
              extra_args_provider=None,
-             collator=None, 
              args_defaults={}):
     """Main training program.
 
@@ -119,15 +118,10 @@ def pretrain(train_valid_test_dataset_provider,
     # Data stuff.
     timers('train/valid/test-data-iterators-setup', log_level=0).start(
         barrier=True)
-    
-    data_collator = None
-    if collator is not None:
-        data_collator = collator()
-
     if args.virtual_pipeline_model_parallel_size is not None:
         all_data_iterators = [
             build_train_valid_test_data_iterators(
-                train_valid_test_dataset_provider, data_collator)
+                train_valid_test_dataset_provider)
             for _ in range(len(model))
         ]
         train_data_iterator = [data_iterators[0]
@@ -139,7 +133,7 @@ def pretrain(train_valid_test_dataset_provider,
     else:
         train_data_iterator, valid_data_iterator, test_data_iterator \
             = build_train_valid_test_data_iterators(
-                train_valid_test_dataset_provider, data_collator)
+                train_valid_test_dataset_provider)
     timers('train/valid/test-data-iterators-setup').stop()
     print_datetime('after dataloaders are built')
 
@@ -905,7 +899,7 @@ def cyclic_iter(iter):
 
 
 def build_train_valid_test_data_loaders(
-        build_train_valid_test_datasets_provider, data_collator=None):
+        build_train_valid_test_datasets_provider):
     """XXX"""
     args = get_args()
 
@@ -948,10 +942,10 @@ def build_train_valid_test_data_loaders(
 
         # Build dataloders.
         train_dataloader = build_pretraining_data_loader(
-            train_ds, args.consumed_train_samples, data_collator)
+            train_ds, args.consumed_train_samples)
         valid_dataloader = build_pretraining_data_loader(
-            valid_ds, args.consumed_valid_samples, data_collator)
-        test_dataloader = build_pretraining_data_loader(test_ds, 0, data_collator)
+            valid_ds, args.consumed_valid_samples)
+        test_dataloader = build_pretraining_data_loader(test_ds, 0)
 
         # Flags to know if we need to do training/validation/testing.
         do_train = train_dataloader is not None and args.train_iters > 0
@@ -962,11 +956,11 @@ def build_train_valid_test_data_loaders(
             [int(do_train), int(do_valid), int(do_test)])
     else:
         flags = torch.cuda.LongTensor([0, 0, 0])
+
     # Broadcast num tokens.
-    # torch.distributed.broadcast(flags, 
-    #                             mpu.get_tensor_model_parallel_src_rank(), 
-    #                             group=mpu.get_tensor_model_parallel_group())
-    torch.distributed.broadcast(flags, 0)
+    torch.distributed.broadcast(flags,
+                                mpu.get_tensor_model_parallel_src_rank(),
+                                group=mpu.get_tensor_model_parallel_group())
     args.do_train = flags[0].item()
     args.do_valid = flags[1].item()
     args.do_test = flags[2].item()
@@ -975,17 +969,18 @@ def build_train_valid_test_data_loaders(
 
 
 def build_train_valid_test_data_iterators(
-        build_train_valid_test_datasets_provider, data_collator=None):
+        build_train_valid_test_datasets_provider):
 
     args = get_args()
 
     # Build loaders.
     train_dataloader, valid_dataloader, test_dataloader = \
         build_train_valid_test_data_loaders(
-            build_train_valid_test_datasets_provider, data_collator)
+            build_train_valid_test_datasets_provider)
+
     # Build iterators.
     dl_type = args.dataloader_type
-    assert dl_type in ['single', 'cyclic'], "dl_type not in 'single', 'cyclic' "
+    assert dl_type in ['single', 'cyclic']
 
     if train_dataloader is not None:
         train_data_iterator = iter(train_dataloader) if dl_type == 'single' \
