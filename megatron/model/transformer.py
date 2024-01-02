@@ -1083,10 +1083,13 @@ class ParallelTransformer(MegatronModule):
         self.recompute_num_layers = args.recompute_num_layers
         self.distribute_saved_activations = \
             args.distribute_saved_activations and not args.sequence_parallel
+        
         self.first_run = True
         self.max_cache_pos = args.max_position_embeddings
-        self.sequence_parallel = args.sequence_parallel
         self.alibi_mask = None
+
+        self.sequence_parallel = args.sequence_parallel
+
         # Transformer Engine Init.
         if self.transformer_impl == 'transformer_engine':
             global transformer_engine
