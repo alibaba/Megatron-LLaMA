@@ -319,6 +319,7 @@ class CoreAttention(MegatronModule):
             (output_size[0]*output_size[1], output_size[2], output_size[3]),
             query_layer.dtype, "mpu")
 
+        # Raw attention scores. [b * np, sq, sk]
         matmul_result = torch.baddbmm(
             matmul_input_buffer,
             query_layer.transpose(0, 1),   # [b * np, sq, hn]
