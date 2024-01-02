@@ -54,6 +54,31 @@ def get_slopes(n):
         )
 
 
+def _fill_with_neg_inf(t):
+    """FP16-compatible function that fills a tensor with -inf."""
+    return t.float().fill_(float("-inf")).type_as(t)
+
+
+def _buffered_future_mask(tensor, maxpos, alibi, attn_heads):
+    _future_mask = torch.triu(_fill_with_neg_inf(torch.zeros([maxpos, maxpos])), 1).to(torch.cuda.current_device())
+    _future_mask = _future_mask.unsqueeze(0) + alibi
+    new_future_mask = _future_mask.to(tensor)
+    return new_future_mask[: tensor.shape[0] * attn_heads, :maxpos, :maxpos]
+
+
+def _gen_alibi_mask(num_attention_heads, max_seq_len):
+    slopes = torch.tensor(get_slopes(num_attention_heads), device=torch.cuda.current_device())
+    alibi = (
+        slopes.unsqueeze(1).unsqueeze(1)
+        * torch.arange(max_seq_len, device=torch.cuda.current_device()).unsqueeze(0).unsqueeze(0).expand(
+            num_attention_heads, -1, -1)
+    )  
+    # alibi = alibi.unsqueeze(0)
+    alibi_mask = torch.triu(_fill_with_neg_inf(torch.zeros([max_seq_len, max_seq_len])), 1).to(torch.cuda.current_device())  # [max_seq_len, max_seq_len]
+    alibi_mask = alibi_mask.unsqueeze(0) + alibi   # [num_attention_heads, max_seq_len, max_seq_len]
+    return alibi_mask
+
+
 def get_linear_layer(rows, columns, init_method):
     """Simple linear layer with weight initialization."""
     layer = torch.nn.Linear(rows, columns)
