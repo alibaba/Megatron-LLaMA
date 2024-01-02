@@ -594,6 +594,7 @@ class ParallelAttention(MegatronModule):
                 encoder_output=None, inference_params=None,
                 rotary_pos_emb=None):
         # hidden_states: [sq, b, h]
+
         # =================================================
         # Pre-allocate memory for key-values for inference.
         # =================================================
@@ -621,6 +622,7 @@ class ParallelAttention(MegatronModule):
             # Attention heads [sq, b, h] --> [sq, b, (np * 3 * hn)]
             mixed_x_layer, _ = self.query_key_value(hidden_states)
             query_layer, key_layer, value_layer = tensor_parallel.split_tensor_along_last_dim(mixed_x_layer, 3)
+
             # Changed layout, for compatibility with CKPT conversion
             new_tensor_shape = query_layer.size()[:-1] + \
                 (self.num_attention_heads_per_partition, self.hidden_size_per_attention_head)
@@ -628,6 +630,7 @@ class ParallelAttention(MegatronModule):
             query_layer = query_layer.view(new_tensor_shape)
             key_layer = key_layer.view(new_tensor_shape)
             value_layer = value_layer.view(new_tensor_shape)
+
         else:
             # Attention heads [sk, b, h] --> [sk, b, (np * 2 * hn)]
             mixed_kv_layer, _ = self.key_value(encoder_output)
@@ -649,9 +652,11 @@ class ParallelAttention(MegatronModule):
                 (self.num_attention_heads_per_partition,
                  self.hidden_size_per_attention_head)
             query_layer = query_layer.view(*new_tensor_shape)
+
         # ==================================
         # Adjust key and value for inference
         # ==================================
+
         # duplicate the pos_emb for self attention
         if rotary_pos_emb is not None:
             if isinstance(rotary_pos_emb, tuple):
@@ -675,6 +680,8 @@ class ParallelAttention(MegatronModule):
                 :sequence_end, batch_start:batch_end, ...]
             value_layer = inference_value_memory[
                 :sequence_end, batch_start:batch_end, ...]
+
+
             # adjust the key rotary positional embedding
             if rotary_pos_emb is not None:
                 q_pos_emb, k_pos_emb = rotary_pos_emb
@@ -709,6 +716,7 @@ class ParallelAttention(MegatronModule):
             # absolute positional embedding.
             # otherwise, only relative positional embedding takes effect
             # value_layer = apply_rotary_pos_emb(value_layer, k_pos_emb)
+
         if not self.use_flash_attn:
             if self.checkpoint_core_attention:
                 context_layer = self._checkpointed_attention_forward(
@@ -732,10 +740,13 @@ class ParallelAttention(MegatronModule):
                 else:
                     context_layer = self.core_attention_flash(q, k, v)
             context_layer = rearrange(context_layer, 'b s h d -> s b (h d)').contiguous()
+
         # =================
         # Output. [sq, b, h]
         # =================
+
         output, bias = self.dense(context_layer)
+
         return output, bias
 
 
@@ -851,6 +862,7 @@ class ParallelTransformerLayer(MegatronModule):
                 encoder_output=None, enc_dec_attn_mask=None,
                 inference_params=None, rotary_pos_emb=None):
         # hidden_states: [s, b, h]
+
         # Layer norm at the beginning of the transformer layer.
         layernorm_output = self.input_layernorm(hidden_states)
         # Self attention.
@@ -860,11 +872,13 @@ class ParallelTransformerLayer(MegatronModule):
                 attention_mask,
                 inference_params=inference_params,
                 rotary_pos_emb=rotary_pos_emb)
+
         # Residual connection.
         if self.apply_residual_connection_post_layernorm:
             residual = layernorm_output
         else:
             residual = hidden_states
+
         if self.drop_path is None:
             # jit scripting for a nn.module (with dropout) is not
             # trigerring the fusion kernel. For now, we use two
@@ -891,8 +905,10 @@ class ParallelTransformerLayer(MegatronModule):
                                               p=self.hidden_dropout,
                                               training=self.training)
             layernorm_input = residual + self.drop_path(out)
+
         # Layer norm post the self attention.
         layernorm_output = self.post_attention_layernorm(layernorm_input)
+
         if self.layer_type == LayerType.decoder:
             attention_output, attention_bias = \
                 self.inter_attention(layernorm_output,
@@ -919,7 +935,7 @@ class ParallelTransformerLayer(MegatronModule):
 
         # MLP.
         mlp_output, mlp_bias = self.mlp(layernorm_output)
-        
+
         # Second residual connection.
         if self.apply_residual_connection_post_layernorm:
             residual = layernorm_output
@@ -953,6 +969,7 @@ class ParallelTransformerLayer(MegatronModule):
                                               p=self.hidden_dropout,
                                               training=self.training)
             output = residual + self.drop_path(out)
+
         return output
 
 
@@ -1339,6 +1356,7 @@ class ParallelTransformer(MegatronModule):
                 encoder_output=None, enc_dec_attn_mask=None,
                 inference_params=None, rotary_pos_emb=None):
         # hidden_states: [s, b, h]
+
         if self.position_embedding_type == "alibi":
             # assert not args.use_flash_attn, \
             #     'ALiBi does not work with FlashAttention currently'
@@ -1455,7 +1473,7 @@ class ParallelTransformer(MegatronModule):
                         forward_kwargs['checkpoint_core_attention'] = self.checkpoint_core_attention
                     else:
                         forward_kwargs['rotary_pos_emb'] = rotary_pos_emb
-                    
+
                     for index in range(self.num_layers):
                         layer = self._get_layer(index)
 
@@ -1467,9 +1485,9 @@ class ParallelTransformer(MegatronModule):
                 # Skip counter update for eval and activation checkpointing
                 if torch.is_grad_enabled() and self.training:
                     self.microbatch_count += 1
-                    
+
         # Final layer norm.
         if self.post_process and self.post_layer_norm:
             hidden_states = self.final_layernorm(hidden_states)
-            
+
         return hidden_states
