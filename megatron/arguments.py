@@ -529,6 +529,9 @@ def _add_network_size_args(parser):
     group.add_argument('--max-position-embeddings', type=int, default=None,
                        help='Maximum number of position embeddings to use. '
                        'This is the size of position embedding.')
+    group.add_argument('--position-embedding-type', type=str, default='learned_absolute',
+                       choices=['learned_absolute', 'rope', 'alibi'],
+                       help='Position embedding type.')
     group.add_argument('--use-rotary-position-embeddings', action='store_true',
                        help='Use rotary positional embeddings or not')
     group.add_argument('--rotary-percent', type=float, default=1.0,
@@ -1104,6 +1107,8 @@ def _add_data_args(parser):
                        help='Sentencepiece tokenizer model.')
     group.add_argument('--tokenizer-name-or-path', type=str, default=None,
                        help='tokenizer model path for PretrainedFromHF.')
+    group.add_argument('--trust-remote-code', action='store_true',
+                       help='Whether trust remote code when using PretrainedFromHF.')
     group.add_argument('--data-impl', type=str, default='infer',
                        choices=['lazy', 'cached', 'mmap', 'infer'],
                        help='Implementation of indexed datasets.')

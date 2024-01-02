@@ -43,7 +43,7 @@ def build_tokenizer(args):
         tokenizer = _NullTokenizer(args.vocab_size)
     elif args.tokenizer_type == 'PretrainedFromHF':
         assert args.tokenizer_name_or_path is not None
-        tokenizer = _AutoTokenizer(args.tokenizer_name_or_path, vocab_extra_ids=args.vocab_extra_ids)
+        tokenizer = _AutoTokenizer(args.tokenizer_name_or_path, trust_remote_code=args.trust_remote_code, vocab_extra_ids=args.vocab_extra_ids)
     else:
         raise NotImplementedError('{} tokenizer is not '
                                   'implemented.'.format(args.tokenizer_type))
@@ -545,13 +545,13 @@ class _NullTokenizer:
 class _AutoTokenizer(AbstractTokenizer):
     """AutoTokenizer for Hf Pretrained model loading."""
 
-    def __init__(self, tokenizer_name_or_path, vocab_extra_ids=0):
+    def __init__(self, tokenizer_name_or_path, trust_remote_code=False, vocab_extra_ids=0):
         name = tokenizer_name_or_path
         super().__init__(name)
         hf_tokenizer_kwargs = {}
         if vocab_extra_ids > 0:
             hf_tokenizer_kwargs["additional_special_tokens"] = [f"<extra_id_{_id}>" for _id in range(vocab_extra_ids)]
-        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, **hf_tokenizer_kwargs)
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path, trust_remote_code=trust_remote_code,**hf_tokenizer_kwargs)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.encoder = self.tokenizer.get_vocab()
         self.decoder = {v: k for k, v in self.encoder.items()}

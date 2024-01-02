@@ -89,22 +89,37 @@ This tool helps convert the format of paramters between Megatron-LLaMA/Megatron-
 
 **HuggingFace to Megatron-LLaMA**
 
+For LLaMA:
 ```
-sh tools/checkpoint_conversion/hf_to_megatron.sh
+sh tools/checkpoint_conversion/hf_to_megatron.sh  
+```
+For Baichuan:
+```
+sh tools/checkpoint_conversion/baichuan_hf_to_megatron.sh  
 ```
 
 **Megatron-LLaMA to HuggingFace**
 
+For LLaMA:
 ```
 sh tools/checkpoint_conversion/megatron_to_hf.sh
+```
+For Baichuan:
+```
+sh tools/checkpoint_conversion/baichuan_megatron_to_hf.sh  
 ```
 
 #### B. Launching scripts
 
 **Single-node launching**
 
+For LLaMA:
 ```
 sh examples/LLaMA/LLaMA_13_standalone.sh
+```
+For Baichuan:
+```
+sh examples/Baichuan_13_standalone.sh  
 ```
 
 **Distributed launching**
