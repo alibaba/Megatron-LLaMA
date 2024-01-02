@@ -23,13 +23,6 @@ try:
 except ImportError:
     rearrange = None
 
-# try:
-#     from flash_attn.flash_attn_interface import flash_attn_unpadded_func
-#     from flash_attn.flash_attn_triton import flash_attn_func 
-# except ImportError:
-#     flash_attn_unpadded_func = None
-#     flash_attn_func = None
-
 try:
     from flash_attn.flash_attn_interface import flash_attn_unpadded_func
 except ImportError:
@@ -512,12 +505,6 @@ class ParallelAttention(MegatronModule):
         self.num_attention_heads_per_partition = core.utils.divide(
             args.num_attention_heads, tensor_parallel_size)
 
-        # coeff = None
-        # self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
-        # if self.apply_query_key_layer_scaling:
-        #     coeff = self.layer_number
-        #     self.norm_factor *= coeff
-        # Thoese for softmax_scale. Current instances doesn't need for now.
         if self.use_flash_attn:
             self.core_attention_flash = FlashSelfAttention(
                 causal=True, attention_dropout=args.attention_dropout
