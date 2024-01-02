@@ -16,7 +16,7 @@ from megatron.model.enums import AttnMaskType, LayerType, AttnType
 from megatron.model.fused_softmax import FusedScaleMaskSoftmax
 from megatron.model.fused_bias_gelu import bias_gelu_impl
 from megatron.model.rotary_pos_embedding import apply_rotary_pos_emb
-from megatron.model.utils import attention_mask_func, alibi_mask_func, get_slopes, openai_gelu, erf_gelu
+from megatron.model.utils import attention_mask_func, alibi_mask_func, get_slopes, _buffered_future_mask, _gen_alibi_mask, openai_gelu, erf_gelu
 
 try:
     from einops import rearrange
@@ -57,32 +57,6 @@ except ImportError:
     tensor of the same size. We use the following arguments:
         hyperparameters: transformer hyperparameters
 """
-
-        
-def _fill_with_neg_inf(t):
-    """FP16-compatible function that fills a tensor with -inf."""
-    return t.float().fill_(float("-inf")).type_as(t)
-
-
-def _buffered_future_mask(tensor, maxpos, alibi, attn_heads):
-    _future_mask = torch.triu(_fill_with_neg_inf(torch.zeros([maxpos, maxpos])), 1).to(torch.cuda.current_device())
-    _future_mask = _future_mask.unsqueeze(0) + alibi
-    new_future_mask = _future_mask.to(tensor)
-    return new_future_mask[: tensor.shape[0] * attn_heads, :maxpos, :maxpos]
-
-
-def _gen_alibi_mask(num_attention_heads, max_seq_len):
-    slopes = torch.tensor(get_slopes(num_attention_heads), device=torch.cuda.current_device())
-    alibi = (
-        slopes.unsqueeze(1).unsqueeze(1)
-        * torch.arange(max_seq_len, device=torch.cuda.current_device()).unsqueeze(0).unsqueeze(0).expand(
-            num_attention_heads, -1, -1)
-    )  
-    # alibi = alibi.unsqueeze(0)
-    alibi_mask = torch.triu(_fill_with_neg_inf(torch.zeros([max_seq_len, max_seq_len])), 1).to(torch.cuda.current_device())  # [max_seq_len, max_seq_len]
-    alibi_mask = alibi_mask.unsqueeze(0) + alibi   # [num_attention_heads, max_seq_len, max_seq_len]
-    return alibi_mask
-
 
 class DropPath(MegatronModule):
     """Drop paths (Stochastic Depth) per sample
@@ -1077,6 +1051,7 @@ class ParallelTransformer(MegatronModule):
         self.position_embedding_type = args.position_embedding_type
         self.num_attention_heads = args.num_attention_heads
         self.params_dtype = args.params_dtype
+
         # Store activation checkpoiting flag.
         self.recompute_granularity = args.recompute_granularity
         self.recompute_method = args.recompute_method
